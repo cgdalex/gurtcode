@@ -1,5 +1,8 @@
 #include "vex.h"
+#include <atomic>
 
+std::atomic<bool> intakeDone(false);
+std::atomic<bool> intakeCancel(false);
 
 
 
@@ -85,79 +88,216 @@ void odom_test(){
 
 
 
-void IntakeSlow()
+void DriveOn(int RPM)
 {
-  // BottomRoller.spin(fwd, 600, rpm);
-  // BigRoller.spin(fwd, 600, rpm);
-  // TopRoller.spin(fwd, 20, rpm); 
-  // LCIntake.spin(fwd, 200, rpm);
-  // RCIntake.spin(fwd, 200, rpm);
+  Fleft.spin(fwd, RPM, rpm); 
+  FBleft.spin(fwd, RPM, rpm);
+  Sleft.spin(fwd, RPM, rpm);
+  BFleft.spin(fwd, RPM, rpm);
+  Bleft.spin(fwd, RPM, rpm);
+
+  Fright.spin(fwd, RPM, rpm);
+  FBright.spin(fwd, RPM, rpm);
+  Sright.spin(fwd, RPM, rpm);
+  BFright.spin(fwd, RPM, rpm);
+  Bright.spin(fwd, RPM, rpm);
 }
 
-void ScoreLow()
+void DriveOnRev(int RPM)
 {
-  // BottomRoller.spin(reverse, 600, rpm);
-  // BigRoller.spin(reverse, 600, rpm);
-  // TopRoller.spin(reverse, 600, rpm); 
-  // RCIntake.spin(reverse, 300, rpm);
-  // LCIntake.spin(reverse, 300, rpm);
+  Fleft.spin(reverse, RPM, rpm); 
+  FBleft.spin(reverse, RPM, rpm);
+  Sleft.spin(reverse, RPM, rpm);
+  BFleft.spin(reverse, RPM, rpm);
+  Bleft.spin(reverse, RPM, rpm);
+
+  Fright.spin(reverse, RPM, rpm);
+  FBright.spin(reverse, RPM, rpm);
+  Sright.spin(reverse, RPM, rpm);
+  BFright.spin(reverse, RPM, rpm);
+  Bright.spin(reverse, RPM, rpm);
 }
 
-void ScoreLong()
-{
-  // BottomRoller.spin(fwd, 600, rpm);
-  // BigRoller.spin(fwd, 600, rpm);
-  // TopRoller.spin(fwd, 600, rpm); 
-  // LCIntake.spin(fwd, 600, rpm);
-  // RCIntake.spin(fwd, 600, rpm);
-}
 
-void ScoreMid()
+void IntakeBalls()
 {
-  // BottomRoller.spin(fwd, 200, rpm);
-  // BigRoller.spin(fwd, 200, rpm);
-  // TopRoller.spin(fwd, 50, rpm); 
-  // LCIntake.spin(fwd, 600, rpm);
-  // RCIntake.spin(fwd, 600, rpm);
+  BottomIntake.spin(fwd, 600, rpm);
+  MiddleIntake.spin(fwd, 600, rpm);
+  TopIntake.setMaxTorque(20, pct);
+  TopIntake.spin(fwd, 600, rpm);
+  Flap.set(true);
+  Intake.set(false);
 }
 
 void IntakeStop()
 {
-  // BottomRoller.stop(coast);
-  // BigRoller.stop(coast);
-  // TopRoller.stop(coast);
-  // LCIntake.stop(coast);
-  // RCIntake.stop(coast);
+  BottomIntake.stop(coast);
+  MiddleIntake.stop(brake);
+  TopIntake.stop(brake);
 }
 
-void FunnelIn()
+void ScoreLong()
 {
-  //Funnel.set(false);
+  BottomIntake.spin(fwd, 600, rpm);
+  MiddleIntake.spin(fwd, 600, rpm);
+  TopIntake.setMaxTorque(100, pct);
+  TopIntake.spin(fwd, 600, rpm);
+  Flap.set(false);
 }
 
-void LiftDown()
+void ScoreMid()
 {
-  // RightLift.set(false);
-  // LeftLift.set(false);
+  BottomIntake.spin(fwd, 300, rpm);
+  MiddleIntake.spin(fwd, 300, rpm);
+  TopIntake.setMaxTorque(100, pct);
+  TopIntake.spin(reverse, 300, rpm);
 }
+
+void ScoreMidFast()
+{
+  BottomIntake.spin(fwd, 600, rpm);
+  MiddleIntake.spin(fwd, 600, rpm);
+  TopIntake.setMaxTorque(100, pct);
+  TopIntake.spin(reverse, 600, rpm);
+}
+
+
+
+// "Real object" filter: must be detected AND close enough to be a ball, not a wall.
+bool SeesRealObjectClose() {
+  double d = Distance.objectDistance(mm);
+  if (d < 0) return false;  // no object
+
+  // Tune these to your robot so it doesn't arm on a wall:
+  const double close_min = 20; // mm
+  const double close_max = 90; // mm
+  return (d >= close_min && d <= close_max);
+}
+
+bool DistanceAboveForTime(double threshold, int time_ms) {
+  int elapsed = 0;
+  const int step = 10;
+
+  while (elapsed < time_ms) {
+    if (intakeCancel) return false;
+
+    double d = Distance.objectDistance(mm);
+
+    // -1 (no object) should NOT count as "above"
+    if (d < 0 || d <= threshold) return false;
+
+    wait(step, msec);
+    elapsed += step;
+  }
+  return true;
+}
+
+
+int IntakeMatchloadThread() {
+  intakeDone = false;
+
+  const int GLOBAL_TIMEOUT_MS = 3000;  // safety timeout
+  int totalElapsed = 0;
+
+  // Start intake
+  BottomIntake.spin(fwd, 600, rpm);
+  MiddleIntake.spin(fwd, 600, rpm);
+  TopIntake.setMaxTorque(20, pct);
+  TopIntake.spin(fwd, 600, rpm);
+  Flap.set(true);
+  Intake.set(false);
+
+  auto seesRealObjectClose = []() -> bool {
+    double d = Distance.objectDistance(mm);
+    if (d < 0) return false;
+    return (d >= 20 && d <= 90); // ball window
+  };
+
+  auto aboveForTime = []() -> bool {
+    int elapsed = 0;
+    const int step = 10;
+    while (elapsed < 1000) {
+      double d = Distance.objectDistance(mm);
+      if (d < 0 || d <= 110) return false;
+      wait(step, msec);
+      elapsed += step;
+    }
+    return true;
+  };
+
+  // Phase 1: wait for first real object OR timeout
+  while (!seesRealObjectClose() && totalElapsed < GLOBAL_TIMEOUT_MS) {
+    wait(20, msec);
+    totalElapsed += 20;
+  }
+
+  wait(60, msec); // debounce
+
+  // Phase 2: wait for exit condition OR timeout
+  while (totalElapsed < GLOBAL_TIMEOUT_MS) {
+    if (aboveForTime()) break;
+    wait(20, msec);
+    totalElapsed += 20;
+  }
+
+  // Stop intake (always)
+  BottomIntake.stop();
+  MiddleIntake.stop();
+  TopIntake.stop();
+
+  // GUARANTEED signal
+  intakeDone = true;
+  return 0;
+}
+
+
+
+
+void StopIntakeOnBlue() {
+  const int TIMEOUT_MS = 4000;
+  int startTime = vex::timer::system();
+
+  Optical.setLightPower(100, pct);
+  Optical.setLight(vex::ledState::on);
+
+  ScoreLong();
+
+  while (true) {
+
+    // ----- TIMEOUT -----
+    if (vex::timer::system() - startTime > TIMEOUT_MS) {
+      IntakeStop();
+      break;   // ← exits loop on timeout
+    }
+
+    // ----- SEE BLUE -----
+    if (Optical.hue() > 190 && Optical.hue() < 270) {
+      IntakeStop();
+      // BottomIntake.spin(reverse, 600, rpm);
+      // MiddleIntake.spin(reverse, 600, rpm);
+
+      break;   // ← exits loop on blue
+    }
+
+    wait(10, msec);
+  }
+
+  // Function exits naturally after loop
+}
+
 
 void FlapDown()
 {
   Flap.set(false);
 }
 
-void ChangeUpOut()
-{
-  // RightP.set(true);
-  // LeftP.set(true);
-}
 
 void ScoreCount(int Balls)
 {
   int Count = 0;
   ScoreLong();
 
-  const int TIMEOUT_MS = 2000;  // how long to wait before giving up
+  const int TIMEOUT_MS = 4000;  // how long to wait before giving up
 
   while (Count < Balls)
   {
@@ -187,18 +327,16 @@ void ScoreCount(int Balls)
   IntakeStop();
 }
 
-
-
-void Skills()
+void BertAuton()
  {
  // Start Odom thread
  thread cord = thread(odom_test);
  //Set Odom Constants
  //and Drive Constance
   odom_constants();
-  chassis.set_coordinates(0, 0, 0);
-  chassis.drive_max_voltage = 2;
-  chassis.heading_max_voltage = 2;
+  chassis.set_coordinates(-16.639, -52.255, 180);
+  chassis.drive_max_voltage = 5;
+  chassis.heading_max_voltage = 5;
   chassis.turn_max_voltage = 5;
   //new variables
   chassis.drive_settle_error = .5;
@@ -209,18 +347,122 @@ void Skills()
   // chassis.turn_settle_time = 0;
   // chassis.swing_settle_time = 1;
   chassis.set_drive_exit_conditions(2, 0, 5000);
-  //chassis.set_turn_exit_conditions(3, 0, 3000);
-  //chassis.set_turn_exit_conditions(4, 0, 5000);
+  chassis.set_turn_exit_conditions(1, 0, 3000);
+// chassis.set_turn_exit_conditions(4, 0, 5000);
   // chassis.holonomic_drive_to_pose(5.94, 44.39, 180);
   // chassis.drive_stop(hold);
 
-  std::vector<Waypoint> path1 = {
-    {0, 23, 0},
-    {21, 49, 45}   // go forward 24 (inches or whatever units your odom uses)
-  };
+std::vector<Waypoint> path1 = { 
+{ -16.640f, -43.577f, 0.0f },
+{ -16.640f, -40.500f, 0.0f },
+{ -16.640f, -37.500f, 0.0f },
+{ -16.640f, -34.500f, 0.0f },
+{ -16.640f, -31.500f, 0.0f },
+{ -16.640f, -28.500f, 0.0f },
+{ -16.640f, -25.500f, 0.0f },
 
-  chassis.drive_with_pursuit_path(path1, 0);
-  chassis.drive_stop(hold);
+// Start curving ~4" earlier (gentle lead-in)
+{ -16.635f, -23.300f, 0.0f },
+{ -16.625f, -22.200f, 0.0f },
+{ -16.610f, -22.200f, 0.0f },
+{ -16.590f, -21.200f, 0.0f },
+{ -16.565f, -20.200f, 0.0f },
+
+// Arc section
+{ -16.620f, -20.000f, 0.0f },
+{ -16.560f, -18.300f, 0.0f },
+{ -16.400f, -16.700f, 0.0f },
+{ -16.120f, -15.200f, 0.0f },
+// { -15.700f, -16.800f, 0.0f },
+{ -15.120f, -12.500f, 0.0f },
+{ -14.400f, -11.300f, 0.0f },
+
+// { -12.600f, -11.650f, 0.0f },
+
+// // Smooth curve into final target (Bezier-like)
+// { -11.900f, -10.300f, 0.0f },
+// { -11.000f, -8.600f, 0.0f },
+// { -10.000f, -6.800f, 0.0f },
+// { -9.300f,  -5.300f, 0.0f }
+// { -10.56f,  -6.17f, 0.0f },
+
+// Final endpoint
+// { -8.684f,  -3.950f, 0.0f }
+//{-10.207, -6.597, 0.0f}
+
+
+};
+
+
+
+// Start: 
+// Ending:
+  chassis.drive_with_pursuit_path(path1, 0); // To MID
+  // chassis.drive_distance(-9);
+  // chassis.turn_to_point(-46.12, -39.74);
+  chassis.set_drive_exit_conditions(2, 0, 200);
+  chassis.heading_max_voltage = 2;
+  chassis.drive_to_pose(-10.207, -6.597, 227);
+  chassis.set_drive_exit_conditions(2, 0, 5000);
+  chassis.drive_stop(coast);
+  
+  // Score top mid
+  ScoreMid();
+
+
+
+  // Going to Matchloader (turning towards matchloader)
+    wait(1000, msec);
+  chassis.set_drive_exit_conditions(2, 0, 5000);
+  chassis.drive_max_voltage = 6;
+  chassis.drive_to_point(-46.12, -39.74);
+
+  MatchLoader.set(true);
+  chassis.turn_to_point(-45.12, -56.50);
+
+  thread Intake = thread(IntakeMatchloadThread);
+  chassis.drive_max_voltage = 5;
+  chassis.set_drive_exit_conditions(2, 0, 1000);
+  chassis.drive_to_point(-45.12, -56.50);
+  chassis.drive_stop(coast);
+  wait(20, msec);
+  DriveOn(40);
+  waitUntil(intakeDone);
+  chassis.heading_max_voltage = 1;
+
+
+  chassis.drive_to_point(-45.43, -24.66);
+  chassis.drive_stop(coast);
+  wait(20, msec);
+  DriveOnRev(50);
+  wait(500, msec);
+  StopIntakeOnBlue();
+  // wait(1000, msec);
+
+ 
+  chassis.drive_max_voltage = 6;
+  chassis.set_drive_exit_conditions(1, 0, 2000);
+  ScoreMidFast();
+  chassis.drive_to_point(-44.93, -54.67); // 2nd time to matchload
+  thread Intake2 = thread(IntakeMatchloadThread);
+  chassis.drive_stop(coast);
+  wait(10, msec);
+  DriveOn(50);
+  chassis.set_drive_exit_conditions(2, 0, 2000);
+
+  waitUntil(intakeDone);
+  // wait(1000000, msec);
+  chassis.drive_to_point(-46.41, -25.23);
+  chassis.drive_stop(coast);
+  wait(20, msec);
+  DriveOnRev(20);
+  //wait(200, msec);
+  ScoreLong();
+  wait(200, msec);
+  MatchLoader.set(false);
+  wait(1800, msec);
+  chassis.drive_to_point(-46.41, -30.33);
+  chassis.drive_to_point(-46.41, -25.23);
 
 
   

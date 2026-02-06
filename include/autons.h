@@ -13,6 +13,7 @@ void odom_test();
 void test();
 void Skills();
 void ZoeySkills();
+void BertAuton();
 
 void default_constants();
 

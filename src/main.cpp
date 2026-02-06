@@ -97,7 +97,7 @@ PORT9,
 
 );
 
-int current_auton_selection = 6;
+int current_auton_selection = 1;
 bool auto_started = false;
 
 /**
@@ -173,7 +173,7 @@ void autonomous(void) {
       //Skills();
       break;
     case 1:  
-      //MabelMiddleRed();      
+      BertAuton();      
       break;
     case 2:
       //MabelMiddleRush();
@@ -188,7 +188,7 @@ void autonomous(void) {
       //odom_test();
       break;
     case 6:
-      Skills();
+      //Skills();
       break;
     case 7:
       ZoeySkills();

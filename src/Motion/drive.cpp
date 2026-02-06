@@ -766,155 +766,106 @@ void Drive::drive_with_pursuit_path(const std::vector<Waypoint>& path, float set
 }
 
 void Drive::drive_with_pursuit_path(const std::vector<Waypoint>& path, float setback, float drive_max_voltage, float heading_max_voltage, float drive_settle_error, float drive_settle_time, float drive_timeout, float drive_kp, float drive_ki, float drive_kd, float drive_starti, float heading_kp, float heading_ki, float heading_kd, float heading_starti) {
-  if (path.empty()) return;
+if (path.empty()) return;
 
-  // Small internal look-ahead feel (0.3–1.0 typical)
-  const float lead = 0.6f;
-  const float min_lookahead = 6.0f; // NEW: minimum lookahead distance so the "carrot" stays ahead of the robot and it doesn't park on each waypoint.
+const float lead = 1.1f;
+  const float min_lookahead = 12.0f;
+  const float switch_radius = 5.0f;
 
-
-
-  // When closer than this to a waypoint, advance to the next (no stop).
-  //const float switch_radius = std::max(drive_settle_error * 2.0f, 2.0f);
-
-  
-
-  const float switch_radius = 3.0f; // CHANGED: fixed small radius so we switch to the next waypoint sooner and don't dwell/slow down near each point.
-
+  static bool last_reverse = false;
+  const float switch_margin_deg = 10.0f;
 
   PID drivePID(0, drive_kp, drive_ki, drive_kd, drive_starti,
                drive_settle_error, drive_settle_time, drive_timeout);
   PID headingPID(0, heading_kp, heading_ki, heading_kd, heading_starti);
 
-  std::size_t idx = 0;                // current target waypoint
-  const Waypoint finalWp = path.back();
-  
-  if (path[idx].pre_path != NULL)
-    {
-      vex::thread(path[idx].pre_path);
-    }
-  while (true) {
-    
+  std::size_t idx = 0;
 
-    // Current pose
+  if (path[idx].pre_path != NULL) {
+    vex::thread(path[idx].pre_path);
+  }
+
+  while (true) {
     const float x   = get_X_position();
     const float y   = get_Y_position();
     const float hdg = get_absolute_heading(); // deg
 
-    // Smoothly advance through waypoints
+    // advance waypoint index
     while (idx + 1 < path.size()) {
-      float dx = path[idx].x - x;
-      float dy = path[idx].y - y;
-      if (std::hypot(dx, dy) < switch_radius) 
-      {
+      const float dx = path[idx].x - x;
+      const float dy = path[idx].y - y;
+      if (std::hypot(dx, dy) < switch_radius) {
         idx++;
-        if (path[idx].pre_path != NULL)
-        {
+        if (path[idx].pre_path != NULL) {
           vex::thread(path[idx].pre_path);
         }
-        
-      }
-
-      else break;
+      } else break;
     }
 
-    // Distance to final target (for finish + final approach shaping)
-    const float gdx = finalWp.x - x;
-    const float gdy = finalWp.y - y;
-    const float dist_to_goal = std::hypot(gdx, gdy);
-
-    // --- Carrot (look-ahead) ---
-    float carrot_X, carrot_Y;
+    // build carrot
+    float carrot_X = path.back().x;
+    float carrot_Y = path.back().y;
 
     if (idx + 1 < path.size()) {
-      // Pursue toward current waypoint with scaled look-ahead along the ray from robot to waypoint
       const float dx = path[idx].x - x;
       const float dy = path[idx].y - y;
       const float d  = std::hypot(dx, dy);
-      if (d < 1e-3f) { carrot_X = path[idx].x; carrot_Y = path[idx].y; }
-      else {
-        //const float look = lead * d;
-        const float look = std::max(lead * d, min_lookahead); // CHANGED: use at least min_lookahead so the carrot doesn't collapse onto the robot and kill forward speed near waypoints.
+
+      if (d < 1e-3f) {
+        carrot_X = path[idx].x;
+        carrot_Y = path[idx].y;
+      } else {
+        const float look = std::max(lead * d, min_lookahead);
         carrot_X = x + (dx / d) * look;
         carrot_Y = y + (dy / d) * look;
       }
-    } else {
-      // Last segment: push carrot behind the final waypoint along its desired angle,
-      // plus a forward bias proportional to remaining distance (lead * dist)
-      carrot_X = finalWp.x - std::sin(to_rad(finalWp.angle_deg)) * (setback + lead * dist_to_goal);
-      carrot_Y = finalWp.y - std::cos(to_rad(finalWp.angle_deg)) * (setback + lead * dist_to_goal);
     }
 
-    // Vector to carrot
+    // vector to carrot
     const float vx = carrot_X - x;
     const float vy = carrot_Y - y;
     const float dist_to_carrot = std::hypot(vx, vy);
 
-    // Drive PID on carrot distance
-    const float drive_error  = dist_to_carrot;
-    float drive_output = drivePID.compute(drive_error);
+    // drive PID
+    float drive_output = drivePID.compute(dist_to_carrot);
 
-    if (dist_to_goal > (setback + drive_settle_error + 1.0f)) { // NEW: only enforce minimum drive when we are not in the final "parking" zone.
-      const float min_drive = std::fabs(drive_min_voltage);     // NEW: use configured drive_min_voltage as a floor for forward speed.
-      if (min_drive > 0.0f && std::fabs(drive_output) < min_drive) {
-        drive_output = (drive_output >= 0.0f ? min_drive : -min_drive); // NEW: prevents the robot from crawling almost to zero between points, keeping motion smooth.
-      }
-    }
+    // carrot heading (your convention 0° = +Y, so atan2(x, y))
+    const float carrot_heading_deg = std::atan2(vx, vy) * (180.0f / M_PI);
 
-    // // --- Desired heading (per-waypoint by default) ---
-    
-    float desired_heading_deg = path[idx].angle_deg;
+    // auto forward/reverse pick (least turning)
+    const float forward_err = reduce_negative_180_to_180(carrot_heading_deg - hdg);
+    const float reverse_err = reduce_negative_180_to_180((carrot_heading_deg + 180.0f) - hdg);
 
-    // On the last approach, make sure final orientation is exactly correct
-    if (idx + 1 == path.size() && dist_to_goal < (setback + drive_settle_error)) {
-        desired_heading_deg = finalWp.angle_deg;
-    }
+    const bool want_reverse = (std::fabs(reverse_err) + switch_margin_deg < std::fabs(forward_err));
+    const bool want_forward = (std::fabs(forward_err) + switch_margin_deg < std::fabs(reverse_err));
 
-    // Compute heading error & PID
-    float heading_error  = reduce_negative_180_to_180(desired_heading_deg - hdg);
+    bool use_reverse = last_reverse;
+    if (want_reverse) use_reverse = true;
+    else if (want_forward) use_reverse = false;
+    last_reverse = use_reverse;
+
+    float heading_error = use_reverse ? reverse_err : forward_err;
     float heading_output = headingPID.compute(heading_error);
 
-    // --- REMOVE HEADING SCALING ON DRIVE OUTPUT ---
-    // In your old code, drive_output was multiplied by cos(heading_error),
-    // which caused the robot to stall or spin if the heading error was large (like 180°).
-    // We remove that entirely so the robot can rotate and translate at the same time
-    // just like in your holonomic move-to-pose controller.
-    const float heading_scale = 1.0f;  // NO SCALING — keep drive power independent from heading error
+    // clamp
+    drive_output   = clamp(drive_output,   -drive_max_voltage,   +drive_max_voltage);
+    heading_output = clamp(heading_output, -heading_max_voltage, +heading_max_voltage);
 
-    // Clamp drive output normally (not scaled by heading error)
-    drive_output = clamp(drive_output,
-                         -drive_max_voltage,
-                         +drive_max_voltage);
+    // reverse flips drive sign
+    if (use_reverse) drive_output = -drive_output;
 
-    // Clamp heading output normally
-    heading_output = clamp(heading_output,
-                           -heading_max_voltage,
-                           +heading_max_voltage);
-
-
-    // Holonomic mixing (same pattern as holonomic_drive_to_pose)
-    // const float motion_heading = std::atan2(vy, vx); // radians
-    // // DriveLF.spin(fwd, drive_output * std::cos(to_rad(hdg) + motion_heading - M_PI/4) + heading_output, volt);
-    // // DriveLB.spin(fwd, drive_output * std::cos(-to_rad(hdg) - motion_heading + 3*M_PI/4) + heading_output, volt);
-    // // DriveRB.spin(fwd, drive_output * std::cos(to_rad(hdg) + motion_heading - M_PI/4) - heading_output, volt);
-    // // DriveRF.spin(fwd, drive_output * std::cos(-to_rad(hdg) - motion_heading + 3*M_PI/4) - heading_output, volt);
-
-    // LeftFrontDrive.spin(fwd, drive_output * std::cos(to_rad(hdg) + motion_heading - M_PI/4) + heading_output, volt);
-    // LeftBackDrive.spin(fwd, drive_output * std::cos(-to_rad(hdg) - motion_heading + 3*M_PI/4) + heading_output, volt);
-    // RightBackDrive.spin(fwd, drive_output * std::cos(to_rad(hdg) + motion_heading - M_PI/4) - heading_output, volt);
-    // RightFrontDrive.spin(fwd, drive_output * std::cos(-to_rad(hdg) - motion_heading + 3*M_PI/4) - heading_output, volt);
-
+    // tank mix
     drive_with_voltage(drive_output + heading_output,
-                   drive_output - heading_output);
+                       drive_output - heading_output);
 
-    const float heading_error_final = reduce_negative_180_to_180(finalWp.angle_deg - hdg);
-    // Finish only when at last waypoint and aligned to its heading
-    if (idx + 1 == path.size() && drivePID.is_settled() && std::fabs(heading_error_final) < 3.0f) {
+    // exit when we're at final XY
+    if (idx + 1 == path.size() && drivePID.is_settled()) {
       break;
     }
 
-    task::sleep(10);
+    task::sleep(5); // faster loop helps at 10V+
   }
 
-  drive_stop(hold);
+  drive_stop(brake);
 }
+
